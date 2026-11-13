@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Test output (generated fixture apps, archives, Chrome profiles)
+test/.tmp/
+
+# Bundles built while trying things out
+*.zip
+
+# Logs
+*.log
+npm-debug.log*
+
+# Local Claude Code settings
+.claude/settings.local.json
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*~

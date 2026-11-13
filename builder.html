@@ -1,0 +1,579 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zip Bundle Builder</title>
+<link rel="icon" href="favicon.svg">
+<style>
+  :root {
+    --bg: #f6f6f4; --panel: #ffffff; --fg: #1d1d1b; --muted: #6b6b66; --line: #deded9;
+    --accent: #2f6fdf; --accent-fg: #ffffff; --error: #b3261e; --ok: #1e7a3c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --panel: #1f1f1e; --fg: #ececea; --muted: #9a9a94; --line: #34342f;
+      --accent: #6c9cf0; --accent-fg: #0d1a33; --error: #f2b8b5; --ok: #8fd6a4;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .lead { color: var(--muted); margin: 0 0 24px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }
+  section h2 { font-size: 15px; margin: 0 0 12px; }
+  label { display: block; font-weight: 600; margin: 14px 0 4px; }
+  label:first-of-type { margin-top: 0; }
+  .hint { color: var(--muted); font-size: 13px; margin: 2px 0 0; font-weight: 400; }
+  input[type=text], textarea {
+    width: 100%; font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: inherit;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px;
+  }
+  textarea { min-height: 70px; resize: vertical; }
+  .choice { display: flex; gap: 8px; align-items: flex-start; font-weight: 400; margin: 8px 0 0; cursor: pointer; }
+  .choice input { margin-top: 3px; }
+  .choice b { font-weight: 600; }
+  button {
+    font: inherit; font-weight: 600; padding: 8px 16px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--accent); background: var(--accent); color: var(--accent-fg);
+  }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .stats { color: var(--muted); font-variant-numeric: tabular-nums; }
+  progress { width: 100%; height: 8px; margin-top: 12px; }
+  #abs-report ul { margin: 6px 0 0; padding-left: 18px; }
+  #abs-report code { font-size: 12px; word-break: break-all; }
+  #log { margin-top: 12px; white-space: pre-wrap; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .error { color: var(--error); }
+  .ok { color: var(--ok); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Zip Bundle Builder</h1>
+  <p class="lead">Packs a web application folder into one uncompressed zip that <code>launcher.html</code> + <code>sw.js</code> can run.</p>
+
+  <section>
+    <h2>1. Application folder</h2>
+    <div class="row">
+      <button id="pick">Choose folder…</button>
+      <span id="folder-stats" class="stats">No folder selected</span>
+    </div>
+  </section>
+
+  <section id="options" hidden>
+    <h2>2. Options</h2>
+
+    <label for="entry">Entry page</label>
+    <input type="text" id="entry" list="html-files" value="index.html" spellcheck="false">
+    <datalist id="html-files"></datalist>
+    <p class="hint">Opened by the launcher. Relative links resolve from its folder.</p>
+
+    <label>Loading</label>
+    <label class="choice"><input type="radio" name="mode" value="range" checked>
+      <span><b>On demand</b> — files are fetched with range requests when the app asks for them, and cached.
+      <span class="hint" style="display:block">For large apps where much of the content is not needed at once.</span></span></label>
+    <label class="choice"><input type="radio" name="mode" value="full">
+      <span><b>Download the whole archive at startup</b> — with a progress bar; afterwards everything is served from disk, also offline.
+      <span class="hint" style="display:block">For apps that need most of their files anyway (many games).</span></span></label>
+    <p id="mode-hint" class="hint"></p>
+
+    <label>Address bar</label>
+    <label class="choice"><input type="checkbox" id="frame" checked>
+      <span><b>Keep the launcher's URL</b> — the app runs in a full-window frame and its URL changes are mirrored into the launcher's, so links copied from the address bar open the same page in any browser.
+      <span class="hint" style="display:block">Off: the address bar shows <code>app.zip/…</code>, and such links work only where the launcher has run before. Apps that need SharedArrayBuffer always run without the frame.</span></span></label>
+
+    <div id="preload-box">
+      <label for="preload">Preload at startup</label>
+      <textarea id="preload" spellcheck="false" placeholder="*.js&#10;assets/ui/**"></textarea>
+      <p class="hint">Glob patterns, one per line. Matching files (and the entry page) are placed at the start of the archive and fetched in one request before the app opens. <span id="preload-stats"></span></p>
+    </div>
+
+    <label for="exclude">Exclude</label>
+    <textarea id="exclude" spellcheck="false"></textarea>
+    <p class="hint">Glob patterns, one per line. A pattern without “/” matches a name in any folder; <code>dir/**</code> skips a whole folder. <span id="exclude-stats"></span></p>
+
+    <label>Absolute paths</label>
+    <div id="abs-report" class="hint"></div>
+    <label class="choice"><input type="checkbox" id="rewrite-on">
+      <span><b>Rewrite absolute paths</b> when serving (best effort): references starting with these prefixes are pointed into the archive</span></label>
+    <textarea id="rewrite" spellcheck="false" placeholder="/assets/&#10;/favicon.ico" style="margin-top:8px"></textarea>
+    <p class="hint">One prefix per line. HTML attributes, CSS <code>url()</code> and JS string literals are rewritten, and an import map covers module paths built at runtime. Other URLs built at runtime (e.g. webpack <code>publicPath: "/"</code>) are not found, so building the app with relative URLs is more reliable.</p>
+
+    <label>Response headers</label>
+    <label class="choice"><input type="checkbox" id="coi">
+      <span>Enable <b>SharedArrayBuffer</b> (adds COOP/COEP headers — needed by multi-threaded WebAssembly, e.g. Godot 4, Emscripten pthreads)</span></label>
+    <textarea id="headers" spellcheck="false" placeholder="Header-Name: value" style="margin-top:8px"></textarea>
+    <p class="hint">Extra headers added to every file served from the archive, one per line.</p>
+  </section>
+
+  <section id="build-box" hidden>
+    <h2>3. Build</h2>
+    <div class="row">
+      <button id="build">Save zip…</button>
+      <span id="build-stats" class="stats"></span>
+    </div>
+    <progress id="progress" max="1" value="0" hidden></progress>
+    <div id="log"></div>
+  </section>
+</main>
+
+<script type="module">
+// ---------------------------------------------------------------- zip writer (stored entries only)
+
+const CRC_TABLE = new Int32Array(256);
+for (let n = 0; n < 256; n++) {
+  let c = n;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  CRC_TABLE[n] = c;
+}
+
+function crcUpdate(crc, bytes) {
+  for (let i = 0; i < bytes.length; i++) crc = CRC_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+  return crc;
+}
+
+async function crc32(blob, onBytes) {
+  let crc = -1;
+  if (blob.size <= 8 << 20) {
+    crc = crcUpdate(crc, new Uint8Array(await blob.arrayBuffer()));
+    onBytes(blob.size);
+  } else {
+    for await (const chunk of blob.stream()) {
+      crc = crcUpdate(crc, chunk);
+      onBytes(chunk.length);
+    }
+  }
+  return (crc ^ -1) >>> 0;
+}
+
+function dosDateTime(ms) {
+  const d = new Date(ms);
+  if (d.getFullYear() < 1980) return { time: 0, date: (1 << 5) | 1 };
+  return {
+    time: (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1),
+    date: ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate(),
+  };
+}
+
+class Bytes {
+  constructor(size) { this.buf = new Uint8Array(size); this.dv = new DataView(this.buf.buffer); this.p = 0; }
+  u16(v) { this.dv.setUint16(this.p, v, true); this.p += 2; return this; }
+  u32(v) { this.dv.setUint32(this.p, v, true); this.p += 4; return this; }
+  u64(v) { this.dv.setBigUint64(this.p, BigInt(v), true); this.p += 8; return this; }
+  bytes(b) { this.buf.set(b, this.p); this.p += b.length; return this; }
+}
+
+const MAX32 = 0xffffffff, MAX16 = 0xffff;
+const MADE_BY = (3 << 8) | 45;  // Unix, spec 4.5
+const FILE_ATTR = (0o100644 << 16) >>> 0;
+
+// files: [{ path, blob, lastModified }] in archive order.
+// sink: { write(Blob) } — receives the archive in order.
+// Returns { size, preloadEnd }; preloadEnd is the offset after the first `preloadCount` files.
+async function writeZip(files, { comment = '', preloadCount = 0, onProgress = () => {} }, sink) {
+  const enc = new TextEncoder();
+  const commentBytes = enc.encode(comment);
+  if (commentBytes.length > MAX16) throw new Error('Archive comment is too long');
+
+  let parts = [], buffered = 0, offset = 0, preloadEnd = 0, processed = 0;
+  const totalBytes = files.reduce((s, f) => s + f.blob.size, 0);
+  const push = async part => {
+    parts.push(part);
+    const size = part.size ?? part.length;
+    buffered += size;
+    offset += size;
+    if (buffered >= 16 << 20) await flush();
+  };
+  const flush = async () => {
+    if (!parts.length) return;
+    await sink.write(new Blob(parts));
+    parts = [];
+    buffered = 0;
+  };
+
+  const central = [];
+  // CRCs of a few files are computed in parallel; batches are capped so memory stays bounded.
+  for (let i = 0, next; i < files.length; i = next) {
+    let bytes = 0;
+    for (next = i; next < files.length && next - i < 32 && (next === i || bytes + files[next].blob.size <= 64 << 20); next++) {
+      bytes += files[next].blob.size;
+    }
+    const batch = files.slice(i, next);
+    const crcs = await Promise.all(batch.map(f => crc32(f.blob, n => onProgress(processed += n, totalBytes))));
+    for (let j = 0; j < batch.length; j++) {
+      const { path, blob, lastModified } = batch[j];
+      const name = enc.encode(path);
+      if (name.length > MAX16) throw new Error(`Path too long: ${path}`);
+      const size = blob.size;
+      const big = size >= MAX32;
+      const { time, date } = dosDateTime(lastModified ?? Date.now());
+      const lho = offset;
+
+      const local = new Bytes(30 + name.length + (big ? 20 : 0))
+        .u32(0x04034b50).u16(big ? 45 : 20).u16(0x0800).u16(0).u16(time).u16(date)
+        .u32(crcs[j]).u32(big ? MAX32 : size).u32(big ? MAX32 : size)
+        .u16(name.length).u16(big ? 20 : 0).bytes(name);
+      if (big) local.u16(1).u16(16).u64(size).u64(size);
+      await push(local.buf);
+      await push(blob);
+      if (i + j + 1 === preloadCount) preloadEnd = offset;
+      central.push({ name, size, crc: crcs[j], time, date, lho });
+    }
+  }
+
+  const cdOffset = offset;
+  for (const e of central) {
+    const extra = [];
+    if (e.size >= MAX32) extra.push(e.size, e.size);
+    if (e.lho >= MAX32) extra.push(e.lho);
+    const extraLen = extra.length ? 4 + extra.length * 8 : 0;
+    const rec = new Bytes(46 + e.name.length + extraLen)
+      .u32(0x02014b50).u16(MADE_BY).u16(extra.length ? 45 : 20).u16(0x0800).u16(0)
+      .u16(e.time).u16(e.date).u32(e.crc)
+      .u32(e.size >= MAX32 ? MAX32 : e.size).u32(e.size >= MAX32 ? MAX32 : e.size)
+      .u16(e.name.length).u16(extraLen).u16(0).u16(0).u16(0).u32(FILE_ATTR)
+      .u32(e.lho >= MAX32 ? MAX32 : e.lho).bytes(e.name);
+    if (extra.length) {
+      rec.u16(1).u16(extra.length * 8);
+      for (const v of extra) rec.u64(v);
+    }
+    await push(rec.buf);
+  }
+  const cdSize = offset - cdOffset;
+  const count = central.length;
+
+  if (count >= MAX16 || cdSize >= MAX32 || cdOffset >= MAX32) {
+    const zip64At = offset;
+    await push(new Bytes(56)
+      .u32(0x06064b50).u64(44).u16(MADE_BY).u16(45).u32(0).u32(0)
+      .u64(count).u64(count).u64(cdSize).u64(cdOffset).buf);
+    await push(new Bytes(20).u32(0x07064b50).u32(0).u64(zip64At).u32(1).buf);
+  }
+  await push(new Bytes(22 + commentBytes.length)
+    .u32(0x06054b50).u16(0).u16(0)
+    .u16(Math.min(count, MAX16)).u16(Math.min(count, MAX16))
+    .u32(Math.min(cdSize, MAX32)).u32(Math.min(cdOffset, MAX32))
+    .u16(commentBytes.length).bytes(commentBytes).buf);
+  await flush();
+  return { size: offset, preloadEnd };
+}
+
+// ---------------------------------------------------------------- globs
+
+function globToRegExp(pattern) {
+  let p = pattern.trim().replace(/^\.?\//, '');
+  if (!p.includes('/')) p = '**/' + p;
+  if (p.endsWith('/')) p += '**';
+  let re = '';
+  for (let i = 0; i < p.length; i++) {
+    const c = p[i];
+    if (c === '*' && p[i + 1] === '*') {
+      if (p[i + 2] === '/') { re += '(?:.*/)?'; i += 2; } else { re += '.*'; i += 1; }
+    } else if (c === '*') re += '[^/]*';
+    else if (c === '?') re += '[^/]';
+    else re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  }
+  return new RegExp('^' + re + '$');
+}
+
+function matcher(text) {
+  const res = text.split('\n').map(s => s.trim()).filter(s => s && !s.startsWith('#')).map(globToRegExp);
+  return path => res.some(re => re.test(path));
+}
+
+// ---------------------------------------------------------------- UI
+
+const $ = id => document.getElementById(id);
+const DEFAULT_EXCLUDE = '.git/**\n.DS_Store\nThumbs.db\ndesktop.ini\n*.map';
+
+let folder = null;     // { name, files: [{ path, file }] }
+let saved = {};
+let absolute = null;   // null while scanning, else [{ path, hits: { prefix: { count, example } } }]
+
+const fmtMB = n => n < 1048576 ? Math.ceil(n / 1024) + ' KB' : (n / 1048576).toFixed(n < 10485760 ? 2 : 1) + ' MB';
+
+function settingsKey() { return 'zip-bundle:' + folder.name; }
+
+function loadSettings() {
+  try { saved = JSON.parse(localStorage.getItem(settingsKey())) || {}; } catch { saved = {}; }
+  $('exclude').value = saved.exclude ?? DEFAULT_EXCLUDE;
+  $('preload').value = saved.preload ?? '';
+  $('headers').value = saved.headers ?? '';
+  $('coi').checked = !!saved.coi;
+  $('frame').checked = saved.frame ?? true;
+  $('rewrite').value = saved.rewrite ?? '';
+  $('rewrite-on').checked = !!saved.rewriteOn;
+  if (saved.entry) $('entry').value = saved.entry;
+  if (saved.mode) document.querySelector(`input[name=mode][value=${saved.mode}]`).checked = true;
+}
+
+function saveSettings() {
+  try {
+    localStorage.setItem(settingsKey(), JSON.stringify({
+      exclude: $('exclude').value, preload: $('preload').value, headers: $('headers').value,
+      coi: $('coi').checked, entry: $('entry').value, mode: mode(), frame: $('frame').checked,
+      rewrite: $('rewrite').value, rewriteOn: $('rewrite-on').checked,
+    }));
+  } catch { /* storage unavailable */ }
+}
+
+const mode = () => document.querySelector('input[name=mode]:checked').value;
+
+async function scan(dir) {
+  const files = [];
+  const walk = async (handle, prefix) => {
+    for await (const [name, child] of handle.entries()) {
+      const path = prefix + name;
+      if (child.kind === 'directory') {
+        if (name === '.git') continue;
+        await walk(child, path + '/');
+      } else {
+        files.push({ path, file: await child.getFile() });
+        if (files.length % 500 === 0) $('folder-stats').textContent = `Scanning… ${files.length} files`;
+      }
+    }
+  };
+  await walk(dir, '');
+  files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return files;
+}
+
+// ---------------------------------------------------------------- absolute path detection
+
+// A reference like "/assets/x.png" resolves to the site root on the hosting, outside the archive.
+// Only paths whose first segment is a top-level folder or file of the archive are reported.
+const TEXT_FILE = /\.(html?|css|m?js|cjs|json|svg|webmanifest|xml)$/i;
+const ABSOLUTE_REF = /(^|["'`(=\s,])\/(?![/\s])([^"'`()\s,<>\\]+)/g;
+
+async function findAbsolutePaths(files) {
+  const topDirs = new Set(), topFiles = new Set();
+  for (const { path } of files) {
+    const i = path.indexOf('/');
+    if (i < 0) topFiles.add(path); else topDirs.add(path.slice(0, i));
+  }
+  const found = [];
+  for (const f of files) {
+    if (!TEXT_FILE.test(f.path) || f.file.size > 20 << 20) continue;
+    const text = await f.file.text();
+    const hits = {};
+    for (const m of text.matchAll(ABSOLUTE_REF)) {
+      const path = m[2].split(/[?#]/)[0];
+      const slash = path.indexOf('/');
+      const prefix = slash > 0 && topDirs.has(path.slice(0, slash)) ? `/${path.slice(0, slash)}/`
+        : slash < 0 && topFiles.has(path) ? `/${path}` : null;
+      if (!prefix) continue;
+      if (!hits[prefix]) {
+        const at = m.index + m[1].length;
+        const line = text.slice(0, at).split('\n').length;
+        const snippet = text.slice(Math.max(0, at - 30), at + 50).replace(/\s+/g, ' ').trim();
+        hits[prefix] = { count: 0, example: `${f.path}:${line}  ${snippet}` };
+      }
+      hits[prefix].count++;
+    }
+    if (Object.keys(hits).length) found.push({ path: f.path, hits });
+  }
+  return found;
+}
+
+// Prefixes found in the files that are not excluded: { prefix: { count, files, example } }
+function absoluteSummary(included) {
+  const summary = {};
+  for (const { path, hits } of absolute || []) {
+    if (!included.has(path)) continue;
+    for (const [prefix, { count, example }] of Object.entries(hits)) {
+      const s = summary[prefix] ||= { count: 0, files: 0, example };
+      s.count += count;
+      s.files++;
+    }
+  }
+  return summary;
+}
+
+function rewritePrefixes() {
+  if (!$('rewrite-on').checked) return [];
+  return $('rewrite').value.split('\n').map(s => s.trim()).filter(s => /^\/[^/\s]/.test(s));
+}
+
+function renderAbsolute(p) {
+  const box = $('abs-report');
+  if (!absolute) { box.textContent = 'Checking text files for absolute paths…'; return; }
+  const summary = absoluteSummary(new Set(p.files.map(f => f.path)));
+  const prefixes = Object.keys(summary).sort();
+  if (!prefixes.length) {
+    box.className = 'hint ok';
+    box.textContent = 'No absolute paths to files of the archive found.';
+    return;
+  }
+  const rewritten = rewritePrefixes();
+  const total = prefixes.reduce((n, k) => n + summary[k].count, 0);
+  box.className = 'hint';
+  box.replaceChildren(`Found ${total} references to the site root (outside the archive). Unless rewritten, they fail on the hosting:`);
+  const list = document.createElement('ul');
+  for (const prefix of prefixes) {
+    const { count, files, example } = summary[prefix];
+    const covered = rewritten.some(r => prefix === r || (r.endsWith('/') && prefix.startsWith(r)));
+    const li = document.createElement('li');
+    li.className = covered ? '' : 'error';
+    li.append(Object.assign(document.createElement('b'), { textContent: prefix }),
+      ` ${count}× in ${files} file${files > 1 ? 's' : ''}${covered ? ', rewritten' : ''}, e.g. `,
+      Object.assign(document.createElement('code'), { textContent: example }));
+    list.append(li);
+  }
+  box.append(list);
+}
+
+// Archive order: entry page, preloaded files, everything else. Within a group files are sorted by
+// path, so files of one folder sit together and on-demand requests for them merge into one.
+function plan() {
+  const excluded = matcher($('exclude').value);
+  const files = folder.files.filter(f => !excluded(f.path));
+  const entry = $('entry').value.trim().replace(/^\/+/, '');
+  const full = mode() === 'full';
+  const preloaded = full ? () => false : matcher($('preload').value);
+  const first = [], pre = [], rest = [];
+  for (const f of files) {
+    if (f.path === entry) first.push(f);
+    else if (preloaded(f.path)) pre.push(f);
+    else rest.push(f);
+  }
+  const preloadCount = !full && pre.length ? first.length + pre.length : 0;
+  return { files: [...first, ...pre, ...rest], entry, entryFound: first.length > 0, preloadCount, excludedCount: folder.files.length - files.length };
+}
+
+function parseHeaders() {
+  const headers = {};
+  if ($('coi').checked) {
+    headers['Cross-Origin-Opener-Policy'] = 'same-origin';
+    headers['Cross-Origin-Embedder-Policy'] = 'require-corp';
+  }
+  for (const line of $('headers').value.split('\n')) {
+    const i = line.indexOf(':');
+    if (i > 0) headers[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  }
+  return headers;
+}
+
+function refresh() {
+  if (!folder) return;
+  const p = plan();
+  const total = p.files.reduce((s, f) => s + f.file.size, 0);
+  $('exclude-stats').textContent = p.excludedCount ? `${p.excludedCount} files excluded.` : '';
+  const preloadBytes = p.files.slice(0, p.preloadCount).reduce((s, f) => s + f.file.size, 0);
+  $('preload-stats').textContent = p.preloadCount
+    ? `${p.preloadCount} files, ${fmtMB(preloadBytes)}.` : '';
+  $('preload-box').hidden = mode() === 'full';
+  $('mode-hint').textContent = `Archive size ≈ ${fmtMB(total)}.`;
+  $('build-stats').textContent = p.entryFound
+    ? `${p.files.length} files, ${fmtMB(total)}`
+    : `Entry page “${p.entry}” not found in the folder`;
+  $('build-stats').className = p.entryFound ? 'stats' : 'stats error';
+  $('build').disabled = !p.entryFound;
+  renderAbsolute(p);
+  saveSettings();
+}
+
+$('pick').onclick = async () => {
+  let dir;
+  try { dir = await showDirectoryPicker({ id: 'zip-bundle-src' }); } catch { return; }
+  $('folder-stats').textContent = 'Scanning…';
+  const files = await scan(dir);
+  folder = { name: dir.name, files };
+  const total = files.reduce((s, f) => s + f.file.size, 0);
+  $('folder-stats').textContent = `${dir.name}: ${files.length} files, ${fmtMB(total)}`;
+  $('html-files').replaceChildren(...files.filter(f => /\.html?$/i.test(f.path))
+    .map(f => Object.assign(document.createElement('option'), { value: f.path })));
+  $('entry').value = files.some(f => f.path === 'index.html') ? 'index.html'
+    : files.find(f => /(^|\/)index\.html?$/i.test(f.path))?.path ?? 'index.html';
+  loadSettings();
+  absolute = null;
+  $('options').hidden = $('build-box').hidden = false;
+  $('log').textContent = '';
+  refresh();
+  const current = folder;
+  const found = await findAbsolutePaths(files);
+  if (folder !== current) return;
+  absolute = found;
+  if (saved.rewrite == null) {
+    // First build of this folder: propose rewriting everything that was found.
+    const prefixes = Object.keys(absoluteSummary(new Set(files.map(f => f.path)))).sort();
+    $('rewrite').value = prefixes.join('\n');
+    $('rewrite-on').checked = prefixes.length > 0;
+  }
+  refresh();
+};
+
+for (const el of document.querySelectorAll('#options input, #options textarea')) {
+  el.addEventListener('input', refresh);
+  el.addEventListener('change', refresh);
+}
+
+$('build').onclick = async () => {
+  const p = plan();
+  let handle;
+  try {
+    handle = await showSaveFilePicker({
+      id: 'zip-bundle-out',
+      suggestedName: 'app.zip',
+      types: [{ description: 'Zip archive', accept: { 'application/zip': ['.zip'] } }],
+    });
+  } catch { return; }
+
+  const log = $('log');
+  const bar = $('progress');
+  $('build').disabled = true;
+  bar.hidden = false;
+  log.className = '';
+  log.textContent = 'Writing…';
+  const config = { zipbundle: 1, entry: p.entry, mode: mode(), preload: 0, headers: parseHeaders(), rewrite: rewritePrefixes(), frame: $('frame').checked };
+  let writable;
+  try {
+    // The preload size is only known after writing, but the comment holding it comes last,
+    // so write the archive once with a placeholder and patch the number in the comment.
+    writable = await handle.createWritable();
+    const placeholder = 1e15;  // reserves enough digits
+    const started = performance.now();
+    const result = await writeZip(
+      p.files.map(f => ({ path: f.path, blob: f.file, lastModified: f.file.lastModified })),
+      {
+        comment: JSON.stringify({ ...config, preload: p.preloadCount ? placeholder : 0 }),
+        preloadCount: p.preloadCount,
+        onProgress: (done, total) => { bar.value = total ? done / total : 1; },
+      },
+      writable,
+    );
+    if (p.preloadCount) {
+      // Same length as the placeholder: pad with spaces inside the JSON.
+      const real = String(result.preloadEnd).padEnd(String(placeholder).length, ' ');
+      const text = JSON.stringify({ ...config, preload: placeholder }).replace(String(placeholder), real);
+      const bytes = new TextEncoder().encode(text);
+      await writable.write({ type: 'write', position: result.size - bytes.length, data: bytes });
+      config.preload = result.preloadEnd;
+    }
+    await writable.close();
+    const seconds = ((performance.now() - started) / 1000).toFixed(1);
+    log.className = 'ok';
+    log.textContent =
+      `Done in ${seconds} s: ${handle.name}, ${p.files.length} files, ${fmtMB(result.size)}.\n` +
+      (config.preload ? `Preloaded at startup: first ${fmtMB(config.preload)}.\n` : '') +
+      `\nUpload ${handle.name}, launcher.html and sw.js to the same folder.\n` +
+      `If the archive is not called app.zip, set <meta name="zip-bundle" content="${handle.name}"> in launcher.html.\n` +
+      `\nBundle settings (stored in the zip comment):\n${JSON.stringify(config, null, 2)}`;
+  } catch (err) {
+    console.error(err);
+    await writable?.abort().catch(() => {});
+    log.className = 'error';
+    log.textContent = `Failed: ${err.message}`;
+  } finally {
+    bar.hidden = true;
+    $('build').disabled = false;
+  }
+};
+
+window.zipBundle = { writeZip, globToRegExp };
+</script>
+</body>
+</html>
